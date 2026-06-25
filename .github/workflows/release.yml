@@ -342,6 +342,11 @@ jobs:
           ARGS: ${{ matrix.args }}
         run: |
           set -euo pipefail
+          # Put the project's local CLIs (tauri, vite, tsc, …) on PATH so the
+          # build command AND Tauri's `beforeBuildCommand` (spawned as a child
+          # shell) resolve them — the package manager would normally do this,
+          # but we invoke the binary directly.
+          export PATH="$PWD/node_modules/.bin:$PATH"
           cmd="${BUILD_COMMAND:-node_modules/.bin/tauri build}"
           echo "+ $cmd $ARGS"
           eval "$cmd $ARGS"
