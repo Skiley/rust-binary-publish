@@ -1,55 +1,47 @@
-name: Release (reusable)
+name: Publish (reusable)
+
+# Generic release publisher: one INPUT describes how to produce the release
+# artifacts; one or more OUTPUTS consume them. Reusable workflows only accept
+# scalar inputs, so `input` (object) and `outputs` (array) are passed as JSON
+# strings and parsed by the `setup` job.
+#
+# Currently supported:
+#   input types : rust-binaries
+#   output types: github-release, npm-package
+#
+# Adding an input type = add a producer job gated on `setup.outputs.input-type`
+# that uploads `build-*` artifacts; the existing outputs consume them unchanged.
 
 on:
   workflow_call:
     inputs:
-      bin:
-        description: "Binary name produced by cargo."
+      input:
+        description: |
+          JSON object describing how to produce the release artifacts.
+          Shape: { "type": <input-type>, ... }. Supported types:
+
+            rust-binaries:
+              binary-name    (required) cargo binary name
+              crate          (optional) cargo package to build with -p
+              targets        (optional) JSON array of { target, runner }
+              readme         (optional) README bundled into each archive (default README.md)
+              archive-prefix (optional) archive name prefix (default <repo>-cli)
         required: true
         type: string
-      crate:
-        description: "Cargo package to build (`cargo build -p <crate>`). Empty builds the workspace default."
-        required: false
-        type: string
-        default: ""
-      npm-package:
-        description: "Full npm package name including scope, e.g. `@org/package`."
+      outputs:
+        description: |
+          JSON array of output descriptors, each { "type": <output-type>, ... }.
+          Supported types:
+
+            github-release:
+              extra-assets (optional) newline-separated extra files to attach
+              env-prefix   (optional) env-var prefix for the install scripts (default uppercased repo name)
+
+            npm-package:
+              package-name        (required) full npm name including scope
+              package-description (required) description for the generated package.json
         required: true
         type: string
-      npm-description:
-        description: "Description for the generated npm package.json."
-        required: true
-        type: string
-      archive-prefix:
-        description: "Archive name prefix. Defaults to `<repo-name>-cli`."
-        required: false
-        type: string
-        default: ""
-      env-prefix:
-        description: "UPPER_CASE prefix for the install scripts' env vars (e.g. MYCLI -> MYCLI_INSTALL_DIR / MYCLI_VERSION). Defaults to the uppercased repo name."
-        required: false
-        type: string
-        default: ""
-      readme:
-        description: "Path (in the consumer repo) to the README bundled into each archive."
-        required: false
-        type: string
-        default: "README.md"
-      targets:
-        description: "JSON array of { target, runner } objects to build."
-        required: false
-        type: string
-        default: '[{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"},{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"},{"target":"aarch64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2025"},{"target":"aarch64-pc-windows-msvc","runner":"windows-2025"}]'
-      extra-assets:
-        description: "Newline-separated list of additional files (in the consumer repo) to attach to the GitHub Release."
-        required: false
-        type: string
-        default: ""
-      publish-npm:
-        description: "Whether to build and publish the npm package."
-        required: false
-        type: boolean
-        default: true
       tag:
         description: "Release tag to build. Defaults to the triggering ref name."
         required: false
@@ -57,7 +49,7 @@ on:
         default: ""
     secrets:
       NPM_TOKEN:
-        description: "npm automation token. Required only when publish-npm is true, and you're not using trusted publishing."
+        description: "npm automation token. Required only for the npm-package output without trusted publishing."
         required: false
 
 env:
@@ -69,13 +61,109 @@ defaults:
     shell: bash
 
 jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      input-type: ${{ steps.parse.outputs.input-type }}
+      binary-name: ${{ steps.parse.outputs.binary-name }}
+      crate: ${{ steps.parse.outputs.crate }}
+      targets: ${{ steps.parse.outputs.targets }}
+      readme: ${{ steps.parse.outputs.readme }}
+      archive-prefix: ${{ steps.parse.outputs.archive-prefix }}
+      want-github-release: ${{ steps.parse.outputs.want-github-release }}
+      gh-extra-assets: ${{ steps.parse.outputs.gh-extra-assets }}
+      gh-env-prefix: ${{ steps.parse.outputs.gh-env-prefix }}
+      want-npm: ${{ steps.parse.outputs.want-npm }}
+      npm-package-name: ${{ steps.parse.outputs.npm-package-name }}
+      npm-package-description: ${{ steps.parse.outputs.npm-package-description }}
+    steps:
+      - name: Parse input & outputs descriptors
+        id: parse
+        env:
+          INPUT_JSON: ${{ inputs.input }}
+          OUTPUTS_JSON: ${{ inputs.outputs }}
+          DEFAULT_TARGETS: '[{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"},{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"},{"target":"aarch64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2025"},{"target":"aarch64-pc-windows-msvc","runner":"windows-2025"}]'
+        run: |
+          set -euo pipefail
+          repo_name="${GITHUB_REPOSITORY##*/}"
+
+          jq -e . >/dev/null 2>&1 <<<"$INPUT_JSON" || { echo "::error::'input' must be valid JSON."; exit 1; }
+          jq -e 'type == "array"' >/dev/null 2>&1 <<<"$OUTPUTS_JSON" || { echo "::error::'outputs' must be a JSON array."; exit 1; }
+
+          # --- input ------------------------------------------------------
+          input_type=$(jq -r '.type // ""' <<<"$INPUT_JSON")
+          case "$input_type" in
+            rust-binaries) ;;
+            "") echo "::error::'input.type' is required."; exit 1 ;;
+            *)  echo "::error::Unsupported input.type '$input_type' (supported: rust-binaries)."; exit 1 ;;
+          esac
+
+          binary_name=$(jq -r '."binary-name" // ""' <<<"$INPUT_JSON")
+          [ -n "$binary_name" ] || { echo "::error::rust-binaries requires 'input.binary-name'."; exit 1; }
+          crate=$(jq -r '.crate // ""' <<<"$INPUT_JSON")
+          readme=$(jq -r '.readme // "README.md"' <<<"$INPUT_JSON")
+          archive_prefix=$(jq -r --arg d "${repo_name}-cli" '."archive-prefix" // $d' <<<"$INPUT_JSON")
+          targets=$(jq -c --argjson d "$DEFAULT_TARGETS" '.targets // $d' <<<"$INPUT_JSON")
+
+          # --- outputs ----------------------------------------------------
+          known='["github-release","npm-package"]'
+          jq -r --argjson known "$known" '.[].type | select(. != null) | select(IN($known[]) | not)' <<<"$OUTPUTS_JSON" \
+            | while IFS= read -r t; do [ -n "$t" ] && echo "::warning::Ignoring unknown output type '$t'."; done
+
+          gh=$(jq -c 'map(select(.type == "github-release"))[0] // empty' <<<"$OUTPUTS_JSON")
+          if [ -n "$gh" ]; then
+            want_gh=true
+            gh_extra_assets=$(jq -r '."extra-assets" // ""' <<<"$gh")
+            default_env_prefix=$(printf '%s' "$repo_name" | tr '[:lower:]-' '[:upper:]_')
+            gh_env_prefix=$(jq -r --arg d "$default_env_prefix" '."env-prefix" // $d' <<<"$gh")
+          else
+            want_gh=false; gh_extra_assets=""; gh_env_prefix=""
+          fi
+
+          npm=$(jq -c 'map(select(.type == "npm-package"))[0] // empty' <<<"$OUTPUTS_JSON")
+          if [ -n "$npm" ]; then
+            want_npm=true
+            npm_name=$(jq -r '."package-name" // ""' <<<"$npm")
+            npm_desc=$(jq -r '."package-description" // ""' <<<"$npm")
+            { [ -n "$npm_name" ] && [ -n "$npm_desc" ]; } \
+              || { echo "::error::npm-package requires 'package-name' and 'package-description'."; exit 1; }
+          else
+            want_npm=false; npm_name=""; npm_desc=""
+          fi
+
+          if [ "$want_gh" = false ] && [ "$want_npm" = false ]; then
+            echo "::error::'outputs' must contain at least one supported output (github-release, npm-package)."; exit 1
+          fi
+
+          # --- emit -------------------------------------------------------
+          {
+            echo "input-type=$input_type"
+            echo "binary-name=$binary_name"
+            echo "crate=$crate"
+            echo "targets=$targets"
+            echo "readme=$readme"
+            echo "archive-prefix=$archive_prefix"
+            echo "want-github-release=$want_gh"
+            echo "gh-env-prefix=$gh_env_prefix"
+            echo "want-npm=$want_npm"
+            echo "npm-package-name=$npm_name"
+            echo "npm-package-description=$npm_desc"
+            echo "gh-extra-assets<<__RBP_EOF__"
+            printf '%s\n' "$gh_extra_assets"
+            echo "__RBP_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+  # --- INPUT: rust-binaries -------------------------------------------------
   build:
     name: Build (${{ matrix.target }})
+    needs: setup
+    if: needs.setup.outputs.input-type == 'rust-binaries'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.targets) }}
+        include: ${{ fromJSON(needs.setup.outputs.targets) }}
     steps:
       - uses: actions/checkout@v6.0.2
         with:
@@ -89,13 +177,11 @@ jobs:
       - name: Build and package
         env:
           TARGET: ${{ matrix.target }}
-          BIN: ${{ inputs.bin }}
-          CRATE: ${{ inputs.crate }}
-          ARCHIVE_PREFIX: ${{ inputs.archive-prefix }}
-          README: ${{ inputs.readme }}
+          BIN: ${{ needs.setup.outputs.binary-name }}
+          CRATE: ${{ needs.setup.outputs.crate }}
+          PREFIX: ${{ needs.setup.outputs.archive-prefix }}
+          README: ${{ needs.setup.outputs.readme }}
         run: |
-          prefix="${ARCHIVE_PREFIX:-${GITHUB_REPOSITORY##*/}-cli}"
-
           pflag=()
           [ -n "$CRATE" ] && pflag=(-p "$CRATE")
           cargo build --release "${pflag[@]}" --target "$TARGET"
@@ -105,25 +191,27 @@ jobs:
             *)         exe="${BIN}" ;;
           esac
 
-          dir="stage/${prefix}-${TARGET}"
+          dir="stage/${PREFIX}-${TARGET}"
           mkdir -p "$dir"
           cp "target/${TARGET}/release/${exe}" "$dir/"
           [ -f "$README" ] && cp "$README" "$dir/"
 
           cd stage
           case "$TARGET" in
-            *windows*) 7z a "${prefix}-${TARGET}.zip" "${prefix}-${TARGET}" > /dev/null ;;
-            *)         tar cJf "${prefix}-${TARGET}.tar.xz" "${prefix}-${TARGET}" ;;
+            *windows*) 7z a "${PREFIX}-${TARGET}.zip" "${PREFIX}-${TARGET}" > /dev/null ;;
+            *)         tar cJf "${PREFIX}-${TARGET}.tar.xz" "${PREFIX}-${TARGET}" ;;
           esac
       - uses: actions/upload-artifact@v7.0.0
         with:
           name: build-${{ matrix.target }}
           path: stage/*-${{ matrix.target }}.*
 
-  release:
-    name: Release
+  # --- OUTPUT: github-release -----------------------------------------------
+  github-release:
+    name: GitHub release
+    needs: [setup, build]
+    if: needs.setup.outputs.want-github-release == 'true'
     runs-on: ubuntu-latest
-    needs: build
     permissions:
       contents: write
     env:
@@ -146,27 +234,24 @@ jobs:
           merge-multiple: true
       - name: Render install scripts
         env:
-          BIN: ${{ inputs.bin }}
-          ARCHIVE_PREFIX: ${{ inputs.archive-prefix }}
-          ENV_PREFIX: ${{ inputs.env-prefix }}
+          BIN: ${{ needs.setup.outputs.binary-name }}
+          PREFIX: ${{ needs.setup.outputs.archive-prefix }}
+          ENV_PREFIX: ${{ needs.setup.outputs.gh-env-prefix }}
         run: |
           name="${GITHUB_REPOSITORY##*/}"
-          prefix="${ARCHIVE_PREFIX:-${name}-cli}"
-          env_prefix="${ENV_PREFIX:-$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')}"
-
           for f in install.sh install.ps1; do
             sed \
               -e "s#__REPO__#${GITHUB_REPOSITORY}#g" \
               -e "s#__NAME__#${name}#g" \
               -e "s#__BIN__#${BIN}#g" \
-              -e "s#__PREFIX__#${prefix}#g" \
-              -e "s#__ENV_PREFIX__#${env_prefix}#g" \
+              -e "s#__PREFIX__#${PREFIX}#g" \
+              -e "s#__ENV_PREFIX__#${ENV_PREFIX}#g" \
               ".rbp/templates/$f" > "assets/$f"
           done
       - name: Stage extra assets
-        if: inputs.extra-assets != ''
+        if: needs.setup.outputs.gh-extra-assets != ''
         env:
-          EXTRA_ASSETS: ${{ inputs.extra-assets }}
+          EXTRA_ASSETS: ${{ needs.setup.outputs.gh-extra-assets }}
         run: |
           printf '%s\n' "$EXTRA_ASSETS" | while IFS= read -r line; do
             path="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
@@ -178,11 +263,12 @@ jobs:
       - name: Create GitHub Release
         run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes assets/*
 
-  publish-npm:
-    name: Publish npm
+  # --- OUTPUT: npm-package --------------------------------------------------
+  npm-package:
+    name: npm package
+    needs: [setup, build]
+    if: needs.setup.outputs.want-npm == 'true'
     runs-on: ubuntu-latest
-    needs: release
-    if: inputs.publish-npm
     permissions:
       contents: read
       id-token: write
@@ -205,20 +291,18 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: Build npm package
         env:
-          PACKAGE: ${{ inputs.npm-package }}
-          BIN: ${{ inputs.bin }}
-          DESCRIPTION: ${{ inputs.npm-description }}
-          ARCHIVE_PREFIX: ${{ inputs.archive-prefix }}
-          TARGETS: ${{ inputs.targets }}
+          PACKAGE: ${{ needs.setup.outputs.npm-package-name }}
+          BIN: ${{ needs.setup.outputs.binary-name }}
+          DESCRIPTION: ${{ needs.setup.outputs.npm-package-description }}
+          PREFIX: ${{ needs.setup.outputs.archive-prefix }}
+          TARGETS: ${{ needs.setup.outputs.targets }}
         run: |
-          name="${GITHUB_REPOSITORY##*/}"
-          prefix="${ARCHIVE_PREFIX:-${name}-cli}"
           node scripts/build-npm-package.mjs \
             --package "$PACKAGE" \
             --bin "$BIN" \
             --description "$DESCRIPTION" \
             --repo "https://github.com/${GITHUB_REPOSITORY}" \
-            --prefix "$prefix" \
+            --prefix "$PREFIX" \
             --targets "$TARGETS" \
             --version "${TAG#v}" \
             --artifacts dist-artifacts \
