@@ -107,7 +107,7 @@ jobs:
           OUTPUTS_JSON: ${{ inputs.outputs }}
           DEFAULT_RUST_TARGETS: '[{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"},{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"},{"target":"aarch64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2025"},{"target":"aarch64-pc-windows-msvc","runner":"windows-2025"}]'
           DEFAULT_TAURI_TARGETS: '[{"key":"linux-x86_64","runner":"ubuntu-24.04"},{"key":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"key":"macos-universal","runner":"macos-latest","args":"--target universal-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"key":"windows-x86_64","runner":"windows-latest"}]'
-          DEFAULT_TAURI_LINUX_DEPS: 'libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev'
+          DEFAULT_TAURI_LINUX_DEPS: 'libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils'
         run: |
           set -euo pipefail
           repo_name="${GITHUB_REPOSITORY##*/}"
