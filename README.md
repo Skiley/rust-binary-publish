@@ -4,23 +4,26 @@ A reusable GitHub Actions release pipeline. One `workflow_call` workflow turns a
 single **input** (how to produce the release artifacts) into one or more
 **outputs** (where they get published).
 
-Today it supports one input type — **`rust-binaries`** (cross-compiled Rust CLI
-binaries) — and two output types — **`github-release`** and **`npm-package`**.
-The input/output split keeps it open to new producers and new destinations
-without changing the contract.
+Today it supports two input types — **`rust-binaries`** (cross-compiled Rust CLI
+binaries) and **`tauri-app`** (per-OS Tauri desktop bundles) — and two output
+types — **`github-release`** and **`npm-package`**. The input/output split keeps
+it open to new producers and new destinations without changing the contract.
 
-For `rust-binaries` the pipeline:
+**`rust-binaries`** builds the binary across a cross-target matrix (Linux musl,
+macOS, Windows MSVC) and packages each target into a `.tar.xz` (Unix) / `.zip`
+(Windows) archive containing the binary plus the project README.
 
-1. **Builds** the binary across a cross-target matrix (Linux musl, macOS, Windows MSVC).
-2. **Packages** each target into a `.tar.xz` (Unix) / `.zip` (Windows) archive
-   containing the binary plus the project README.
+**`tauri-app`** builds the Tauri app on a per-OS runner matrix (Tauri bundles
+can't be cross-compiled) and collects the installers it produces — `.deb` /
+`.rpm` / `.AppImage` (Linux), `.dmg` / `.app.tar.gz` (macOS), `.msi` / NSIS
+`.exe` (Windows).
 
-`github-release` then renders & uploads `install.sh` (`curl … | sh`) and
-`install.ps1` (`iwr … | iex`), attaches every archive, any extra assets, and a
-`sha256.sum`, and cuts the release. `npm-package` bundles every platform binary
-behind a tiny zero-dependency dispatch stub (`process.platform + '-' +
-process.arch`) and publishes to npm. Outputs are independent — request any
-subset.
+`github-release` attaches every produced artifact, any extra assets, and a
+`sha256.sum`, then cuts the release. For `rust-binaries` it additionally renders
+& uploads `install.sh` (`curl … | sh`) and `install.ps1` (`iwr … | iex`).
+`npm-package` (rust-binaries only) bundles every platform binary behind a tiny
+zero-dependency dispatch stub (`process.platform + '-' + process.arch`) and
+publishes to npm. Outputs are independent — request any subset.
 
 ## Inputs are JSON strings
 
@@ -95,6 +98,27 @@ A JSON object — `{ "type": <input-type>, … }`.
 | `readme`         | no       | `README.md`       | README bundled into each archive.            |
 | `archive-prefix` | no       | `<repo-name>-cli` | Archive name prefix.                         |
 
+### `tauri-app`
+
+Builds the Tauri app once per OS (bundles can't be cross-compiled) and attaches
+every installer it produces. Compatible with the `github-release` output only.
+
+| Field             | Required | Default                          | Description                                                          |
+|-------------------|----------|----------------------------------|----------------------------------------------------------------------|
+| `project-path`    | no       | `.`                              | Directory containing the Tauri app (with `src-tauri/`).              |
+| `package-manager` | no       | detect from lockfile             | `pnpm` / `yarn` / `npm` / `bun`.                                     |
+| `node-version`    | no       | `24`                             | Node version to set up.                                              |
+| `linux-deps`      | no       | Tauri/WebKit apt set             | Space-separated apt packages installed on Linux runners.            |
+| `install-command` | no       | per package manager              | JS dependency install command (e.g. `pnpm install --frozen-lockfile`).|
+| `build-command`   | no       | `node_modules/.bin/tauri build`  | Build command, run in `project-path`.                               |
+| `post-build`      | no       | —                                | Command run after the build (every OS), in `project-path`.          |
+| `targets`         | no       | 4 default targets                | JSON array of `{ key, runner, args?, rust-targets? }`.              |
+
+Each `targets` entry: `key` names the uploaded artifact, `runner` is the GitHub
+runner, `args` are appended to the build command (e.g.
+`--target universal-apple-darwin`), and `rust-targets` is a comma-separated list
+of Rust targets to install for that runner.
+
 ## `outputs`
 
 A JSON array of `{ "type": <output-type>, … }`. At least one supported output is
@@ -125,6 +149,8 @@ using npm trusted publishing.
 
 ## Default targets
 
+`rust-binaries`:
+
 ```
 x86_64-unknown-linux-musl    (ubuntu-24.04)
 aarch64-unknown-linux-musl   (ubuntu-24.04-arm)
@@ -134,5 +160,37 @@ x86_64-pc-windows-msvc       (windows-2025)
 aarch64-pc-windows-msvc      (windows-2025)
 ```
 
-Override via `input.targets` (JSON). The npm bundler maps each Rust triple to
-its `process.platform-process.arch` key automatically.
+The npm bundler maps each Rust triple to its `process.platform-process.arch` key
+automatically.
+
+`tauri-app`:
+
+```
+linux-x86_64       (ubuntu-24.04)
+linux-aarch64      (ubuntu-24.04-arm)
+macos-universal    (macos-latest, --target universal-apple-darwin)
+windows-x86_64     (windows-latest)
+```
+
+Override either via `input.targets` (JSON).
+
+## Tauri example
+
+```yaml
+jobs:
+  release:
+    uses: Skiley/rust-binary-publish/.github/workflows/release.yml@v2.0.0
+    permissions:
+      contents: write
+    with:
+      tag: ${{ inputs.tag || github.ref_name }}
+      input: |
+        {
+          "type": "tauri-app",
+          "post-build": "bash scripts/fix-appimage.sh"
+        }
+      outputs: |
+        [
+          { "type": "github-release" }
+        ]
+```

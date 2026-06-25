@@ -6,8 +6,9 @@ name: Publish (reusable)
 # strings and parsed by the `setup` job.
 #
 # Currently supported:
-#   input types : rust-binaries
+#   input types : rust-binaries, tauri-app
 #   output types: github-release, npm-package
+#                 (npm-package applies to rust-binaries only)
 #
 # Adding an input type = add a producer job gated on `setup.outputs.input-type`
 # that uploads `build-*` artifacts; the existing outputs consume them unchanged.
@@ -20,12 +21,22 @@ on:
           JSON object describing how to produce the release artifacts.
           Shape: { "type": <input-type>, ... }. Supported types:
 
-            rust-binaries:
+            rust-binaries (cross-compiled CLI binaries):
               binary-name    (required) cargo binary name
               crate          (optional) cargo package to build with -p
               targets        (optional) JSON array of { target, runner }
               readme         (optional) README bundled into each archive (default README.md)
               archive-prefix (optional) archive name prefix (default <repo>-cli)
+
+            tauri-app (per-OS Tauri bundles: .deb/.rpm/.AppImage/.dmg/.msi/.exe):
+              project-path     (optional) dir containing the Tauri app (default ".")
+              package-manager  (optional) pnpm|yarn|npm|bun (default: detect from lockfile)
+              node-version     (optional) Node version to set up (default "24")
+              linux-deps       (optional) apt packages for Linux runners (default: Tauri/WebKit set)
+              install-command  (optional) JS dependency install command (default: per package manager)
+              build-command    (optional) build command (default "node_modules/.bin/tauri build")
+              post-build       (optional) command run after the build, in project-path, on every OS
+              targets          (optional) JSON array of { key, runner, args?, rust-targets? }
         required: true
         type: string
       outputs:
@@ -36,8 +47,9 @@ on:
             github-release:
               extra-assets (optional) newline-separated extra files to attach
               env-prefix   (optional) env-var prefix for the install scripts (default uppercased repo name)
+                                      (rust-binaries only — install scripts are not generated for tauri-app)
 
-            npm-package:
+            npm-package (rust-binaries only):
               package-name        (required) full npm name including scope
               package-description (required) description for the generated package.json
         required: true
@@ -66,11 +78,21 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       input-type: ${{ steps.parse.outputs.input-type }}
+      targets: ${{ steps.parse.outputs.targets }}
+      # rust-binaries
       binary-name: ${{ steps.parse.outputs.binary-name }}
       crate: ${{ steps.parse.outputs.crate }}
-      targets: ${{ steps.parse.outputs.targets }}
       readme: ${{ steps.parse.outputs.readme }}
       archive-prefix: ${{ steps.parse.outputs.archive-prefix }}
+      # tauri-app
+      tauri-project-path: ${{ steps.parse.outputs.tauri-project-path }}
+      tauri-package-manager: ${{ steps.parse.outputs.tauri-package-manager }}
+      tauri-node-version: ${{ steps.parse.outputs.tauri-node-version }}
+      tauri-linux-deps: ${{ steps.parse.outputs.tauri-linux-deps }}
+      tauri-install-command: ${{ steps.parse.outputs.tauri-install-command }}
+      tauri-build-command: ${{ steps.parse.outputs.tauri-build-command }}
+      tauri-post-build: ${{ steps.parse.outputs.tauri-post-build }}
+      # outputs
       want-github-release: ${{ steps.parse.outputs.want-github-release }}
       gh-extra-assets: ${{ steps.parse.outputs.gh-extra-assets }}
       gh-env-prefix: ${{ steps.parse.outputs.gh-env-prefix }}
@@ -83,7 +105,9 @@ jobs:
         env:
           INPUT_JSON: ${{ inputs.input }}
           OUTPUTS_JSON: ${{ inputs.outputs }}
-          DEFAULT_TARGETS: '[{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"},{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"},{"target":"aarch64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2025"},{"target":"aarch64-pc-windows-msvc","runner":"windows-2025"}]'
+          DEFAULT_RUST_TARGETS: '[{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"},{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"},{"target":"aarch64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2025"},{"target":"aarch64-pc-windows-msvc","runner":"windows-2025"}]'
+          DEFAULT_TAURI_TARGETS: '[{"key":"linux-x86_64","runner":"ubuntu-24.04"},{"key":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"key":"macos-universal","runner":"macos-latest","args":"--target universal-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"key":"windows-x86_64","runner":"windows-latest"}]'
+          DEFAULT_TAURI_LINUX_DEPS: 'libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev'
         run: |
           set -euo pipefail
           repo_name="${GITHUB_REPOSITORY##*/}"
@@ -91,20 +115,36 @@ jobs:
           jq -e . >/dev/null 2>&1 <<<"$INPUT_JSON" || { echo "::error::'input' must be valid JSON."; exit 1; }
           jq -e 'type == "array"' >/dev/null 2>&1 <<<"$OUTPUTS_JSON" || { echo "::error::'outputs' must be a JSON array."; exit 1; }
 
+          # rust-binaries fields
+          binary_name=""; crate=""; readme=""; archive_prefix=""
+          # tauri-app fields
+          t_project_path="."; t_pm=""; t_node="24"; t_linux_deps="$DEFAULT_TAURI_LINUX_DEPS"
+          t_install=""; t_build=""; t_post_build=""
+
           # --- input ------------------------------------------------------
           input_type=$(jq -r '.type // ""' <<<"$INPUT_JSON")
           case "$input_type" in
-            rust-binaries) ;;
+            rust-binaries)
+              binary_name=$(jq -r '."binary-name" // ""' <<<"$INPUT_JSON")
+              [ -n "$binary_name" ] || { echo "::error::rust-binaries requires 'input.binary-name'."; exit 1; }
+              crate=$(jq -r '.crate // ""' <<<"$INPUT_JSON")
+              readme=$(jq -r '.readme // "README.md"' <<<"$INPUT_JSON")
+              archive_prefix=$(jq -r --arg d "${repo_name}-cli" '."archive-prefix" // $d' <<<"$INPUT_JSON")
+              targets=$(jq -c --argjson d "$DEFAULT_RUST_TARGETS" '.targets // $d' <<<"$INPUT_JSON")
+              ;;
+            tauri-app)
+              t_project_path=$(jq -r '."project-path" // "."' <<<"$INPUT_JSON")
+              t_pm=$(jq -r '."package-manager" // ""' <<<"$INPUT_JSON")
+              t_node=$(jq -r '."node-version" // "24"' <<<"$INPUT_JSON")
+              t_linux_deps=$(jq -r --arg d "$DEFAULT_TAURI_LINUX_DEPS" '."linux-deps" // $d' <<<"$INPUT_JSON")
+              t_install=$(jq -r '."install-command" // ""' <<<"$INPUT_JSON")
+              t_build=$(jq -r '."build-command" // ""' <<<"$INPUT_JSON")
+              t_post_build=$(jq -r '."post-build" // ""' <<<"$INPUT_JSON")
+              targets=$(jq -c --argjson d "$DEFAULT_TAURI_TARGETS" '.targets // $d' <<<"$INPUT_JSON")
+              ;;
             "") echo "::error::'input.type' is required."; exit 1 ;;
-            *)  echo "::error::Unsupported input.type '$input_type' (supported: rust-binaries)."; exit 1 ;;
+            *)  echo "::error::Unsupported input.type '$input_type' (supported: rust-binaries, tauri-app)."; exit 1 ;;
           esac
-
-          binary_name=$(jq -r '."binary-name" // ""' <<<"$INPUT_JSON")
-          [ -n "$binary_name" ] || { echo "::error::rust-binaries requires 'input.binary-name'."; exit 1; }
-          crate=$(jq -r '.crate // ""' <<<"$INPUT_JSON")
-          readme=$(jq -r '.readme // "README.md"' <<<"$INPUT_JSON")
-          archive_prefix=$(jq -r --arg d "${repo_name}-cli" '."archive-prefix" // $d' <<<"$INPUT_JSON")
-          targets=$(jq -c --argjson d "$DEFAULT_TARGETS" '.targets // $d' <<<"$INPUT_JSON")
 
           # --- outputs ----------------------------------------------------
           known='["github-release","npm-package"]'
@@ -135,15 +175,25 @@ jobs:
           if [ "$want_gh" = false ] && [ "$want_npm" = false ]; then
             echo "::error::'outputs' must contain at least one supported output (github-release, npm-package)."; exit 1
           fi
+          if [ "$input_type" = "tauri-app" ] && [ "$want_npm" = true ]; then
+            echo "::error::The 'npm-package' output is not supported for the 'tauri-app' input."; exit 1
+          fi
 
           # --- emit -------------------------------------------------------
           {
             echo "input-type=$input_type"
+            echo "targets=$targets"
             echo "binary-name=$binary_name"
             echo "crate=$crate"
-            echo "targets=$targets"
             echo "readme=$readme"
             echo "archive-prefix=$archive_prefix"
+            echo "tauri-project-path=$t_project_path"
+            echo "tauri-package-manager=$t_pm"
+            echo "tauri-node-version=$t_node"
+            echo "tauri-linux-deps=$t_linux_deps"
+            echo "tauri-install-command=$t_install"
+            echo "tauri-build-command=$t_build"
+            echo "tauri-post-build=$t_post_build"
             echo "want-github-release=$want_gh"
             echo "gh-env-prefix=$gh_env_prefix"
             echo "want-npm=$want_npm"
@@ -206,11 +256,141 @@ jobs:
           name: build-${{ matrix.target }}
           path: stage/*-${{ matrix.target }}.*
 
+  # --- INPUT: tauri-app -----------------------------------------------------
+  build-tauri:
+    name: Bundle (${{ matrix.key }})
+    needs: setup
+    if: needs.setup.outputs.input-type == 'tauri-app'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.setup.outputs.targets) }}
+    steps:
+      - uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux' && needs.setup.outputs.tauri-linux-deps != ''
+        env:
+          LINUX_DEPS: ${{ needs.setup.outputs.tauri-linux-deps }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $LINUX_DEPS
+
+      - name: Resolve package manager & commands
+        id: pm
+        env:
+          PROJECT_PATH: ${{ needs.setup.outputs.tauri-project-path }}
+          PM_OVERRIDE: ${{ needs.setup.outputs.tauri-package-manager }}
+          INSTALL_OVERRIDE: ${{ needs.setup.outputs.tauri-install-command }}
+        run: |
+          set -euo pipefail
+          pm="$PM_OVERRIDE"
+          if [ -z "$pm" ]; then
+            if   [ -f "$PROJECT_PATH/pnpm-lock.yaml" ];   then pm=pnpm
+            elif [ -f "$PROJECT_PATH/yarn.lock" ];        then pm=yarn
+            elif [ -f "$PROJECT_PATH/bun.lockb" ] || [ -f "$PROJECT_PATH/bun.lock" ]; then pm=bun
+            elif [ -f "$PROJECT_PATH/package-lock.json" ]; then pm=npm
+            else pm=npm; fi
+          fi
+          case "$pm" in
+            pnpm) node_cache=pnpm; lockfile="$PROJECT_PATH/pnpm-lock.yaml";   install="pnpm install --frozen-lockfile" ;;
+            yarn) node_cache=yarn; lockfile="$PROJECT_PATH/yarn.lock";        install="yarn install --frozen-lockfile" ;;
+            npm)  node_cache=npm;  lockfile="$PROJECT_PATH/package-lock.json"; install="npm ci" ;;
+            bun)  node_cache="";   lockfile="";                                install="bun install --frozen-lockfile" ;;
+            *) echo "::error::Unsupported package-manager '$pm' (supported: pnpm, yarn, npm, bun)."; exit 1 ;;
+          esac
+          [ -n "$INSTALL_OVERRIDE" ] && install="$INSTALL_OVERRIDE"
+          {
+            echo "pm=$pm"
+            echo "node-cache=$node_cache"
+            echo "lockfile=$lockfile"
+            echo "install=$install"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up pnpm
+        if: steps.pm.outputs.pm == 'pnpm'
+        uses: pnpm/action-setup@v6.0.8
+
+      - name: Set up Bun
+        if: steps.pm.outputs.pm == 'bun'
+        uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: ${{ needs.setup.outputs.tauri-node-version }}
+          cache: ${{ steps.pm.outputs.node-cache }}
+          cache-dependency-path: ${{ steps.pm.outputs.lockfile }}
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.16.1
+        with:
+          target: ${{ matrix.rust-targets }}
+
+      - name: Install JS dependencies
+        working-directory: ${{ needs.setup.outputs.tauri-project-path }}
+        env:
+          INSTALL_COMMAND: ${{ steps.pm.outputs.install }}
+        run: eval "$INSTALL_COMMAND"
+
+      - name: Build Tauri bundles
+        working-directory: ${{ needs.setup.outputs.tauri-project-path }}
+        env:
+          BUILD_COMMAND: ${{ needs.setup.outputs.tauri-build-command }}
+          POST_BUILD: ${{ needs.setup.outputs.tauri-post-build }}
+          ARGS: ${{ matrix.args }}
+        run: |
+          set -euo pipefail
+          cmd="${BUILD_COMMAND:-node_modules/.bin/tauri build}"
+          echo "+ $cmd $ARGS"
+          eval "$cmd $ARGS"
+          if [ -n "$POST_BUILD" ]; then
+            echo "+ $POST_BUILD"
+            eval "$POST_BUILD"
+          fi
+
+      - name: Collect bundles
+        env:
+          PROJECT_PATH: ${{ needs.setup.outputs.tauri-project-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-bundles
+          target_dir="$PROJECT_PATH/src-tauri/target"
+          found=0
+          # Bundles live at <target>/[<triple>/]release/bundle/<kind>/<file>;
+          # match only finished artifacts (skip the unpacked staging dirs).
+          while IFS= read -r f; do
+            cp "$f" dist-bundles/
+            echo "  collected $(basename "$f")"
+            found=1
+          done < <(find "$target_dir" -type f -path '*/release/bundle/*' \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*.app.tar.gz' \
+               -o -name '*.msi' -o -name '*.msi.zip' \
+               -o -name '*.exe' -o -name '*.nsis.zip' \
+               -o -name '*.sig' \) )
+          if [ "$found" != 1 ]; then
+            echo "::error::No Tauri bundles found under $target_dir."; exit 1
+          fi
+          ls -la dist-bundles
+
+      - uses: actions/upload-artifact@v7.0.0
+        with:
+          name: build-${{ matrix.key }}
+          path: dist-bundles/*
+
   # --- OUTPUT: github-release -----------------------------------------------
   github-release:
     name: GitHub release
-    needs: [setup, build]
-    if: needs.setup.outputs.want-github-release == 'true'
+    needs: [setup, build, build-tauri]
+    if: >-
+      always()
+      && needs.setup.result == 'success'
+      && needs.setup.outputs.want-github-release == 'true'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+      && (needs.build-tauri.result == 'success' || needs.build-tauri.result == 'skipped')
+      && !(needs.build.result == 'skipped' && needs.build-tauri.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -222,6 +402,7 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Checkout publisher tooling
+        if: needs.setup.outputs.input-type == 'rust-binaries'
         uses: actions/checkout@v6.0.2
         with:
           repository: Skiley/rust-binary-publish
@@ -233,6 +414,7 @@ jobs:
           pattern: build-*
           merge-multiple: true
       - name: Render install scripts
+        if: needs.setup.outputs.input-type == 'rust-binaries'
         env:
           BIN: ${{ needs.setup.outputs.binary-name }}
           PREFIX: ${{ needs.setup.outputs.archive-prefix }}
@@ -263,7 +445,7 @@ jobs:
       - name: Create GitHub Release
         run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes assets/*
 
-  # --- OUTPUT: npm-package --------------------------------------------------
+  # --- OUTPUT: npm-package (rust-binaries only) -----------------------------
   npm-package:
     name: npm package
     needs: [setup, build]
