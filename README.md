@@ -84,6 +84,19 @@ jobs:
 > exact same revision via `github.job_workflow_sha`, so the version you pin
 > governs the entire release behavior.
 
+## Permissions
+
+Grant the caller `permissions:` the outputs you request — the workflow's jobs
+inherit them:
+
+| Output           | Required caller permission       |
+|------------------|----------------------------------|
+| `github-release` | `contents: write`                |
+| `npm-package`    | `id-token: write` (for npm provenance), plus `contents: write` |
+
+A `github-release`-only consumer (e.g. a Tauri app) needs just
+`contents: write` — it must **not** be forced to grant `id-token: write`.
+
 ## `input`
 
 A JSON object — `{ "type": <input-type>, … }`.

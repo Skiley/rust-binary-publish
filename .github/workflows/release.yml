@@ -451,9 +451,11 @@ jobs:
     needs: [setup, build]
     if: needs.setup.outputs.want-npm == 'true'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
+    # No job-level `permissions:` — it inherits the caller's grant. A static
+    # `id-token: write` here would force EVERY consumer (even github-release-only
+    # ones like Tauri apps) to grant id-token, since a called workflow's job
+    # permissions are validated against the caller for all jobs, run or not.
+    # npm-package consumers must grant `id-token: write` at the caller level.
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
