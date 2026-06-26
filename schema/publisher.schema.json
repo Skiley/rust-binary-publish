@@ -1,0 +1,160 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/Skiley/rust-binary-publish/v3.0.0/schema/publisher.schema.json",
+  "title": "rust-binary-publish config",
+  "description": "Config for the Skiley/rust-binary-publish reusable release workflow. One input (how to produce the release artifacts) and one or more outputs (where to publish them).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["input", "outputs"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL to this JSON Schema, for editor autocomplete & validation."
+    },
+    "input": {
+      "description": "How to produce the release artifacts.",
+      "oneOf": [
+        { "$ref": "#/definitions/rustBinariesInput" },
+        { "$ref": "#/definitions/tauriAppInput" }
+      ]
+    },
+    "outputs": {
+      "type": "array",
+      "description": "Where to publish the produced artifacts. At least one supported output is required.",
+      "minItems": 1,
+      "items": {
+        "oneOf": [
+          { "$ref": "#/definitions/githubReleaseOutput" },
+          { "$ref": "#/definitions/npmPackageOutput" }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "rustBinariesInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Cross-compiled Rust CLI binaries, packaged per target into .tar.xz / .zip archives.",
+      "required": ["type", "binary-name"],
+      "properties": {
+        "type": { "const": "rust-binaries" },
+        "binary-name": {
+          "type": "string",
+          "description": "Binary name produced by cargo."
+        },
+        "crate": {
+          "type": "string",
+          "description": "Cargo package to build (cargo build -p <crate>). Defaults to the workspace default."
+        },
+        "targets": {
+          "type": "array",
+          "description": "Cross-target matrix. Defaults to the 6 standard Linux/macOS/Windows targets.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["target", "runner"],
+            "properties": {
+              "target": { "type": "string", "description": "Rust target triple, e.g. x86_64-unknown-linux-musl." },
+              "runner": { "type": "string", "description": "GitHub runner label, e.g. ubuntu-24.04." }
+            }
+          }
+        },
+        "readme": {
+          "type": "string",
+          "description": "README bundled into each archive. Defaults to README.md."
+        },
+        "archive-prefix": {
+          "type": "string",
+          "description": "Archive name prefix. Defaults to <repo-name>-cli."
+        }
+      }
+    },
+    "tauriAppInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-OS Tauri desktop bundles (.deb/.rpm/.AppImage/.dmg/.msi/.exe). Compatible with the github-release output only.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "tauri-app" },
+        "project-path": {
+          "type": "string",
+          "description": "Directory containing the Tauri app (with src-tauri/). Defaults to \".\"."
+        },
+        "package-manager": {
+          "type": "string",
+          "enum": ["pnpm", "yarn", "npm", "bun"],
+          "description": "JS package manager. Defaults to detection from the lockfile."
+        },
+        "node-version": {
+          "type": "string",
+          "description": "Node version to set up. Defaults to \"24\"."
+        },
+        "linux-deps": {
+          "type": "string",
+          "description": "Space-separated apt packages installed on Linux runners. Defaults to the Tauri/WebKit set."
+        },
+        "install-command": {
+          "type": "string",
+          "description": "JS dependency install command. Defaults to the per-package-manager command."
+        },
+        "build-command": {
+          "type": "string",
+          "description": "Build command, run in project-path. Defaults to node_modules/.bin/tauri build."
+        },
+        "post-build": {
+          "type": "string",
+          "description": "Command run after the build (every OS), in project-path."
+        },
+        "targets": {
+          "type": "array",
+          "description": "Per-OS bundle matrix. Defaults to the 4 standard Linux/macOS/Windows runners.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["key", "runner"],
+            "properties": {
+              "key": { "type": "string", "description": "Names the uploaded artifact." },
+              "runner": { "type": "string", "description": "GitHub runner label." },
+              "args": { "type": "string", "description": "Appended to the build command, e.g. --target universal-apple-darwin." },
+              "rust-targets": { "type": "string", "description": "Comma-separated Rust targets to install for this runner." }
+            }
+          }
+        }
+      }
+    },
+    "githubReleaseOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Attach every produced artifact (plus extra assets and a sha256.sum) and cut a GitHub Release. For rust-binaries it also renders & uploads install.sh / install.ps1.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "github-release" },
+        "extra-assets": {
+          "type": "string",
+          "description": "Newline-separated extra files (in the consumer repo) to attach."
+        },
+        "env-prefix": {
+          "type": "string",
+          "description": "Env-var prefix in the install scripts (MYCLI -> MYCLI_INSTALL_DIR). Defaults to the uppercased repo name. rust-binaries only."
+        }
+      }
+    },
+    "npmPackageOutput": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Bundle every platform binary behind a tiny dispatch stub and publish to npm. rust-binaries only.",
+      "required": ["type", "package-name", "package-description"],
+      "properties": {
+        "type": { "const": "npm-package" },
+        "package-name": {
+          "type": "string",
+          "description": "Full npm name including scope, e.g. @org/package."
+        },
+        "package-description": {
+          "type": "string",
+          "description": "Description for the generated package.json."
+        }
+      }
+    }
+  }
+}

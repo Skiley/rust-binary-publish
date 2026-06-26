@@ -1,9 +1,11 @@
 name: Publish (reusable)
 
-# Generic release publisher: one INPUT describes how to produce the release
-# artifacts; one or more OUTPUTS consume them. Reusable workflows only accept
-# scalar inputs, so `input` (object) and `outputs` (array) are passed as JSON
-# strings and parsed by the `setup` job.
+# Generic release publisher: the consumer repo describes its release in a
+# `.publisher.json` config file — one INPUT (how to produce the artifacts) and
+# one or more OUTPUTS (where to publish them). The `setup` job checks out the
+# consumer repo, reads the config, and fans the parsed values out to the
+# producer/output jobs. (Reusable workflows only accept scalar inputs, so the
+# structured config lives in the consumer repo rather than in `with:`.)
 #
 # Currently supported:
 #   input types : rust-binaries, tauri-app
@@ -16,18 +18,20 @@ name: Publish (reusable)
 on:
   workflow_call:
     inputs:
-      input:
+      config:
         description: |
-          JSON object describing how to produce the release artifacts.
-          Shape: { "type": <input-type>, ... }. Supported types:
+          Path (in the consumer repo) to the JSON config describing the release.
+          Defaults to `.publisher.json`. Shape:
+            { "input": { "type": <input-type>, ... },
+              "outputs": [ { "type": <output-type>, ... } ] }
 
+          input types:
             rust-binaries (cross-compiled CLI binaries):
               binary-name    (required) cargo binary name
               crate          (optional) cargo package to build with -p
               targets        (optional) JSON array of { target, runner }
               readme         (optional) README bundled into each archive (default README.md)
               archive-prefix (optional) archive name prefix (default <repo>-cli)
-
             tauri-app (per-OS Tauri bundles: .deb/.rpm/.AppImage/.dmg/.msi/.exe):
               project-path     (optional) dir containing the Tauri app (default ".")
               package-manager  (optional) pnpm|yarn|npm|bun (default: detect from lockfile)
@@ -37,23 +41,18 @@ on:
               build-command    (optional) build command (default "node_modules/.bin/tauri build")
               post-build       (optional) command run after the build, in project-path, on every OS
               targets          (optional) JSON array of { key, runner, args?, rust-targets? }
-        required: true
-        type: string
-      outputs:
-        description: |
-          JSON array of output descriptors, each { "type": <output-type>, ... }.
-          Supported types:
 
+          output types:
             github-release:
               extra-assets (optional) newline-separated extra files to attach
               env-prefix   (optional) env-var prefix for the install scripts (default uppercased repo name)
                                       (rust-binaries only — install scripts are not generated for tauri-app)
-
             npm-package (rust-binaries only):
               package-name        (required) full npm name including scope
               package-description (required) description for the generated package.json
-        required: true
+        required: false
         type: string
+        default: .publisher.json
       tag:
         description: "Release tag to build. Defaults to the triggering ref name."
         required: false
@@ -100,11 +99,14 @@ jobs:
       npm-package-name: ${{ steps.parse.outputs.npm-package-name }}
       npm-package-description: ${{ steps.parse.outputs.npm-package-description }}
     steps:
-      - name: Parse input & outputs descriptors
+      - name: Checkout consumer repo
+        uses: actions/checkout@v6.0.2
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Parse config file
         id: parse
         env:
-          INPUT_JSON: ${{ inputs.input }}
-          OUTPUTS_JSON: ${{ inputs.outputs }}
+          CONFIG_FILE: ${{ inputs.config }}
           DEFAULT_RUST_TARGETS: '[{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"},{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"},{"target":"aarch64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-apple-darwin","runner":"macos-latest"},{"target":"x86_64-pc-windows-msvc","runner":"windows-2025"},{"target":"aarch64-pc-windows-msvc","runner":"windows-2025"}]'
           DEFAULT_TAURI_TARGETS: '[{"key":"linux-x86_64","runner":"ubuntu-24.04"},{"key":"linux-aarch64","runner":"ubuntu-24.04-arm"},{"key":"macos-universal","runner":"macos-latest","args":"--target universal-apple-darwin","rust-targets":"aarch64-apple-darwin,x86_64-apple-darwin"},{"key":"windows-x86_64","runner":"windows-latest"}]'
           DEFAULT_TAURI_LINUX_DEPS: 'libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev xdg-utils'
@@ -112,8 +114,15 @@ jobs:
           set -euo pipefail
           repo_name="${GITHUB_REPOSITORY##*/}"
 
-          jq -e . >/dev/null 2>&1 <<<"$INPUT_JSON" || { echo "::error::'input' must be valid JSON."; exit 1; }
-          jq -e 'type == "array"' >/dev/null 2>&1 <<<"$OUTPUTS_JSON" || { echo "::error::'outputs' must be a JSON array."; exit 1; }
+          [ -f "$CONFIG_FILE" ] || { echo "::error::Config file '$CONFIG_FILE' not found in the consumer repository."; exit 1; }
+          jq -e . >/dev/null 2>&1 <"$CONFIG_FILE" || { echo "::error::'$CONFIG_FILE' is not valid JSON."; exit 1; }
+
+          INPUT_JSON=$(jq -c '.input // empty' <"$CONFIG_FILE")
+          OUTPUTS_JSON=$(jq -c '.outputs // empty' <"$CONFIG_FILE")
+          [ -n "$INPUT_JSON" ] || { echo "::error::'$CONFIG_FILE' must contain an 'input' object."; exit 1; }
+          jq -e 'type == "object"' >/dev/null 2>&1 <<<"$INPUT_JSON" || { echo "::error::'$CONFIG_FILE': 'input' must be a JSON object."; exit 1; }
+          [ -n "$OUTPUTS_JSON" ] || { echo "::error::'$CONFIG_FILE' must contain an 'outputs' array."; exit 1; }
+          jq -e 'type == "array"' >/dev/null 2>&1 <<<"$OUTPUTS_JSON" || { echo "::error::'$CONFIG_FILE': 'outputs' must be a JSON array."; exit 1; }
 
           # rust-binaries fields
           binary_name=""; crate=""; readme=""; archive_prefix=""

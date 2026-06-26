@@ -25,20 +25,49 @@ can't be cross-compiled) and collects the installers it produces — `.deb` /
 zero-dependency dispatch stub (`process.platform + '-' + process.arch`) and
 publishes to npm. Outputs are independent — request any subset.
 
-## Inputs are JSON strings
+## Config lives in `.publisher.json`
 
 GitHub reusable workflows only accept **scalar** inputs (`string` / `number` /
-`boolean`) — you cannot pass a YAML object or array to `with:`. So the
-structured `input` and `outputs` are passed as **JSON strings** and parsed
-inside the workflow.
+`boolean`) — you cannot pass a YAML object or array to `with:`. So rather than
+stuffing JSON strings into the workflow YAML, the structured `input` and
+`outputs` live in a **`.publisher.json`** file at the root of the consumer repo.
+The `setup` job checks out the consumer repo, reads the file, and parses it.
+
+Because it's a plain JSON file, point `$schema` at the published
+[`publisher.schema.json`](schema/publisher.schema.json) for editor autocomplete
+and validation.
 
 ## Usage
 
-In the consumer repo, replace the bespoke release workflow with a thin caller:
+In the consumer repo, add two files.
+
+**`.publisher.json`** (repo root) — describes the release:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/Skiley/rust-binary-publish/v3.0.0/schema/publisher.schema.json",
+  "input": {
+    "type": "rust-binaries",
+    "binary-name": "myproject",
+    "crate": "myproject-cli"
+  },
+  "outputs": [
+    {
+      "type": "github-release",
+      "extra-assets": "schema/myproject.schema.json"
+    },
+    {
+      "type": "npm-package",
+      "package-name": "@org/myproject",
+      "package-description": "myproject CLI — Great CLI"
+    }
+  ]
+}
+```
+
+**`.github/workflows/release.yml`** — a thin caller (no config inline):
 
 ```yaml
-# .github/workflows/release.yml
-
 name: Release
 on:
   push:
@@ -51,30 +80,12 @@ on:
 
 jobs:
   release:
-    uses: Skiley/rust-binary-publish/.github/workflows/release.yml@v2.0.0
+    uses: Skiley/rust-binary-publish/.github/workflows/release.yml@v3.0.0
     permissions:
       contents: write
       id-token: write
     with:
       tag: ${{ inputs.tag || github.ref_name }}
-      input: |
-        {
-          "type": "rust-binaries",
-          "binary-name": "myproject",
-          "crate": "myproject-cli"
-        }
-      outputs: |
-        [
-          {
-            "type": "github-release",
-            "extra-assets": "schema/myproject.schema.json"
-          },
-          {
-            "type": "npm-package",
-            "package-name": "@org/myproject",
-            "package-description": "myproject CLI — Great CLI"
-          }
-        ]
     secrets:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 ```
@@ -82,7 +93,8 @@ jobs:
 > **Pin a version.** Reference the workflow at a released tag. The pipeline
 > checks out its own tooling (npm bundler + install-script templates) at the
 > exact same revision via `github.job_workflow_sha`, so the version you pin
-> governs the entire release behavior.
+> governs the entire release behavior. `.publisher.json` is read from the
+> consumer repo at the **release tag**, so it must be committed by then.
 
 ## Permissions
 
@@ -99,7 +111,7 @@ A `github-release`-only consumer (e.g. a Tauri app) needs just
 
 ## `input`
 
-A JSON object — `{ "type": <input-type>, … }`.
+The `input` key in `.publisher.json` — a JSON object `{ "type": <input-type>, … }`.
 
 ### `rust-binaries`
 
@@ -134,8 +146,9 @@ of Rust targets to install for that runner.
 
 ## `outputs`
 
-A JSON array of `{ "type": <output-type>, … }`. At least one supported output is
-required; unknown types are ignored with a warning.
+The `outputs` key in `.publisher.json` — a JSON array of
+`{ "type": <output-type>, … }`. At least one supported output is required;
+unknown types are ignored with a warning.
 
 ### `github-release`
 
@@ -154,11 +167,14 @@ required; unknown types are ignored with a warning.
 Secret `NPM_TOKEN` is required for the `npm-package` output only when you're not
 using npm trusted publishing.
 
-## Top-level inputs
+## Top-level workflow inputs
 
-| Input | Required | Default             | Description           |
-|-------|----------|---------------------|-----------------------|
-| `tag` | no       | triggering ref name | Release tag to build. |
+Passed via `with:` in the caller workflow (not in `.publisher.json`):
+
+| Input    | Required | Default            | Description                                   |
+|----------|----------|--------------------|-----------------------------------------------|
+| `tag`    | no       | triggering ref name | Release tag to build.                        |
+| `config` | no       | `.publisher.json`   | Path (in the consumer repo) to the config file. |
 
 ## Default targets
 
@@ -189,21 +205,30 @@ Override either via `input.targets` (JSON).
 
 ## Tauri example
 
+`.publisher.json`:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/Skiley/rust-binary-publish/v3.0.0/schema/publisher.schema.json",
+  "input": {
+    "type": "tauri-app",
+    "post-build": "bash scripts/fix-appimage.sh"
+  },
+  "outputs": [
+    { "type": "github-release" }
+  ]
+}
+```
+
+`.github/workflows/release.yml` — a `github-release`-only consumer needs just
+`contents: write`:
+
 ```yaml
 jobs:
   release:
-    uses: Skiley/rust-binary-publish/.github/workflows/release.yml@v2.0.0
+    uses: Skiley/rust-binary-publish/.github/workflows/release.yml@v3.0.0
     permissions:
       contents: write
     with:
       tag: ${{ inputs.tag || github.ref_name }}
-      input: |
-        {
-          "type": "tauri-app",
-          "post-build": "bash scripts/fix-appimage.sh"
-        }
-      outputs: |
-        [
-          { "type": "github-release" }
-        ]
 ```
