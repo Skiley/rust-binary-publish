@@ -85,6 +85,10 @@
           "enum": ["pnpm", "yarn", "npm", "bun"],
           "description": "JS package manager. Defaults to detection from the lockfile."
         },
+        "cache-dependency-path": {
+          "type": "string",
+          "description": "Lockfile path (relative to the repo root) used to key the JS dependency cache. Defaults to \"<project-path>/<lockfile>\"; set this for a pnpm/yarn workspace whose single lockfile lives at the repo root while project-path points at a member package, e.g. \"pnpm-lock.yaml\"."
+        },
         "node-version": {
           "type": "string",
           "description": "Node version to set up. Defaults to \"24\"."
