@@ -1,0 +1,29 @@
+{
+	"$schema": "https://github.com/Skiley/runfile/releases/latest/download/v0.schema.json",
+	"globals": {
+		"logging": true
+	},
+	"targets": {
+		"release": {
+			"description": "Bumps the version (major/minor/patch) derived from the latest git tag, tags the commit, then pushes everything so CI runs the release",
+			"commands": [
+				"{{ define(part, one_of(ARGS, 'major', 'minor', 'patch')) }}",
+				"{{ define(cur, regex_capture(capture('git tag --list \"v*.*.*\" --sort=-v:refname | head -n1'), '([0-9]+)\\.([0-9]+)\\.([0-9]+)', '0')) }}",
+				{
+					"match": "{{ VAR.part }}",
+					"cases": {
+						"major": "{{ define(new, concat(add(nth(VAR.cur, '.', '0'), '1'), '.0.0')) }}",
+						"minor": "{{ define(new, concat(nth(VAR.cur, '.', '0'), '.', add(nth(VAR.cur, '.', '1'), '1'), '.0')) }}",
+						"patch": "{{ define(new, concat(nth(VAR.cur, '.', '0'), '.', nth(VAR.cur, '.', '1'), '.', add(nth(VAR.cur, '.', '2'), '1'))) }}"
+					}
+				},
+				"{{ define(tag, concat('v', VAR.new)) }}",
+				"echo 'Releasing: {{ VAR.cur }} -> {{ VAR.new }} (tag {{ VAR.tag }})'",
+				"git tag {{ shell_quote(VAR.tag) }}",
+				"git push",
+				"git push --tags"
+			],
+			"forceShell": "sh"
+		}
+	}
+}
