@@ -471,8 +471,18 @@ jobs:
           done
       - name: Checksums
         run: cd assets && sha256sum * > sha256.sum
-      - name: Create GitHub Release
-        run: gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes assets/*
+      - name: Publish to the GitHub Release
+        # Create the release if it doesn't exist yet, then attach the assets. A
+        # consumer can create the release earlier in the same run — to control the
+        # order assets appear in, or to attach its own artifacts first — and this
+        # step uploads to that existing release instead of failing. `--clobber` also
+        # makes a re-run idempotent (it overwrites an asset rather than erroring).
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber assets/*
 
   # --- OUTPUT: npm-package (rust-binaries only) -----------------------------
   npm-package:

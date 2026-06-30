@@ -157,6 +157,12 @@ unknown types are ignored with a warning.
 | `extra-assets` | no       | —                    | Newline-separated extra files to attach.                           |
 | `env-prefix`   | no       | uppercased repo name | Env-var prefix in install scripts (`MYCLI` → `MYCLI_INSTALL_DIR`). |
 
+The release is **created if it doesn't exist yet, then assets are uploaded**
+(`--clobber`), so the step is idempotent on re-runs. It also means a consumer can
+create the release earlier in the same run — to attach its own artifacts first, or
+control the order assets appear in — and this output uploads to that existing
+release instead of failing.
+
 ### `npm-package`
 
 | Field                 | Required | Description                                   |
